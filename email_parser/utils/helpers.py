@@ -32,12 +32,18 @@ def generate_id(content, file_id=None, message_index=None):
         base_id = hashlib.md5(str(file_id).encode('utf-8')).hexdigest()[:16]
         
         # TODO: Add the index to the base_id if needed or for any edge cases.
-        # # If this is a nested message, add the index
-        # if message_index is not None:
-        #     # Format: base_id + '_n' + index (n for nested)
-        #     return f"{base_id}_n{message_index}"
+        # Make all messages from the same file have the same ID (commented out)
+        # Uncomment the following code if you want different IDs for main vs nested messages
         
-        # For the main message in the file, just use the base_id
+        # If this is a nested message, add the index
+        if message_index is not None:
+            # Just return the same base_id for all messages
+            # This ensures all messages from the same file have the same ID
+            # If you want different IDs, use the commented line below instead
+            # return f"{base_id}_n{message_index}"
+            pass
+        
+        # For all messages in the file, just use the base_id
         return base_id
     
     # Fallback to content-based hash if no file_id is provided
@@ -189,32 +195,118 @@ def extract_date(header_date: str) -> Optional[str]:
     if not header_date:
         return None
     
+    # Special case for Enron nested email format: MM/DD/YYYY HH:MM AM/PM
+    enron_pattern = r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$'
+    enron_match = re.match(enron_pattern, header_date.strip())
+    if enron_match:
+        try:
+            date_part, hour, minute, second, ampm = enron_match.groups()
+            
+            # Convert to 24-hour format if needed
+            hour = int(hour)
+            if ampm and ampm.upper() == 'PM' and hour < 12:
+                hour += 12
+            elif ampm and ampm.upper() == 'AM' and hour == 12:
+                hour = 0
+            
+            # Create datetime object
+            month, day, year = map(int, date_part.split('/'))
+            second = int(second) if second else 0
+            
+            dt = datetime(year, month, day, hour, int(minute), second)
+            
+            # Add timezone (assuming US/Central for Enron)
+            central = pytz.timezone('US/Central')
+            dt = central.localize(dt)
+            
+            # Convert to UTC
+            dt = dt.astimezone(pytz.UTC)
+            
+            return dt.isoformat()
+        except Exception:
+            pass
+    
     # Common date formats in emails
     date_formats = [
+        # Standard email formats
         '%a, %d %b %Y %H:%M:%S %z',
         '%d %b %Y %H:%M:%S %z',
         '%a, %d %b %Y %H:%M:%S',
         '%d %b %Y %H:%M:%S',
-        '%m/%d/%Y %I:%M:%S %p',  # MM/DD/YYYY HH:MM:SS AM/PM (Enron format)
+        
+        # Enron-specific formats
+        '%m/%d/%Y %I:%M:%S %p',  # MM/DD/YYYY HH:MM:SS AM/PM
+        '%m/%d/%Y %H:%M:%S',      # MM/DD/YYYY HH:MM:SS (24-hour)
+        '%m/%d/%Y %I:%M %p',      # MM/DD/YYYY HH:MM AM/PM (without seconds)
+        '%m/%d/%Y %H:%M',         # MM/DD/YYYY HH:MM (without seconds, 24-hour)
+        
+        # Short date formats
+        '%m/%d/%y %I:%M:%S %p',   # MM/DD/YY HH:MM:SS AM/PM
+        '%m/%d/%y %H:%M:%S',      # MM/DD/YY HH:MM:SS (24-hour)
+        '%m/%d/%y %I:%M %p',      # MM/DD/YY HH:MM AM/PM (without seconds)
+        '%m/%d/%y %H:%M',         # MM/DD/YY HH:MM (without seconds, 24-hour)
     ]
     
     # Try each format until one works
     for fmt in date_formats:
         try:
-            # Limit to first 31 chars which should contain the date part
-            date_str = header_date[:31] if len(header_date) > 31 else header_date
+            # Remove any trailing text after the date that might cause parsing issues
+            # This helps with formats like "10/06/2000 06:59 AM To:"
+            if ' To:' in header_date:
+                header_date = header_date.split(' To:')[0].strip()
+                
+            # Handle specific Enron formats
+            if 'AM' in header_date or 'PM' in header_date:
+                # Extract the date part and normalize
+                match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))', header_date)
+                if match:
+                    header_date = match.group(1)
+            
+            date_str = header_date.strip()
             dt = datetime.strptime(date_str, fmt)
             
             # Add UTC timezone if not specified
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=pytz.UTC)
-            else:
+                # Assuming Enron emails are in US Central Time
+                central = pytz.timezone('US/Central')
+                dt = central.localize(dt)
                 # Convert to UTC
                 dt = dt.astimezone(pytz.UTC)
                 
             return dt.isoformat()
-        except:
+        except Exception:
             continue
+    
+    # If standard parsing fails, try to extract date using regex
+    try:
+        # Look for Enron-style date patterns (broader match)
+        match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?', header_date)
+        if match:
+            date_part, hour, minute, second, ampm = match.groups()
+            
+            # Convert to 24-hour format if needed
+            hour = int(hour)
+            if ampm and ampm.upper() == 'PM' and hour < 12:
+                hour += 12
+            elif ampm and ampm.upper() == 'AM' and hour == 12:
+                hour = 0
+            
+            # Create datetime object
+            month, day, year = map(int, date_part.split('/'))
+            second = int(second) if second else 0
+            
+            dt = datetime(year, month, day, hour, int(minute), second)
+            
+            # Add timezone (assuming US/Central for Enron)
+            central = pytz.timezone('US/Central')
+            dt = central.localize(dt)
+            
+            # Convert to UTC
+            dt = dt.astimezone(pytz.UTC)
+            
+            return dt.isoformat()
+    except Exception:
+        pass
     
     # If all parsing attempts fail
     return None

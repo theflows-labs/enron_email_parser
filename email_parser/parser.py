@@ -77,6 +77,10 @@ class EmailParser:
         # Create DataFrame and assign thread IDs
         df = pd.DataFrame(emails_data)
         df['thread_id'] = df.apply(self._generate_thread_id, axis=1)
+
+        # Drop the file_source column TODO: this can be avilded if we skip file_source from df. Just want to have it in case.
+        if 'file_source' in df.columns:
+            df = df.drop(columns=['file_source'])
         
         return df
     
@@ -198,7 +202,7 @@ class EmailParser:
         
         Args:
             forwarded_content: Content of the forwarded email
-            file_id: Identifier for the source (for tracking purposes)
+            file_id: Path to the original email file
             idx: Index of the nested email in the parent
             parent_subject: Subject of the parent email
             
@@ -206,6 +210,173 @@ class EmailParser:
             Dictionary with nested email data or None if extraction fails
         """
         try:
+            # Special handling for the Allan Severude format
+            # Look for pattern matching name on line 1, date on line 2, To: on line 3
+            lines = forwarded_content.split('\n')
+            if len(lines) >= 5:
+                name_line = lines[0].strip()
+                date_line = lines[1].strip() if len(lines) > 1 else ""
+                to_line = lines[2].strip() if len(lines) > 2 else ""
+                
+                # Check if this matches our pattern
+                if (name_line and 
+                    re.match(r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)', date_line) and
+                    to_line.lower().startswith('to:')):
+                    
+                    # This is the specific format, extract details directly
+                    sender = name_line.lower().replace(' ', '.') + '@enron.com'
+                    date_str = date_line
+                    
+                    # Extract To: recipients
+                    to_recipients = []
+                    if len(to_line) > 3:
+                        to_text = to_line[3:].strip()  # Remove "To:" prefix
+                        
+                        # Handle multi-line recipients
+                        current_section = 'to'
+                        full_to_text = to_text
+                        full_cc_text = ""
+                        subject = ""
+                        
+                        # Process remaining lines to gather all recipients and subject
+                        for i in range(3, len(lines)):
+                            line = lines[i].strip()
+                            
+                            if line.lower().startswith('cc:'):
+                                current_section = 'cc'
+                                if len(line) > 3:
+                                    full_cc_text = line[3:].strip()  # Remove "cc:" prefix
+                            elif line.lower().startswith('subject:'):
+                                current_section = 'subject'
+                                if len(line) > 8:
+                                    subject = line[8:].strip()  # Remove "Subject:" prefix
+                                break  # Subject is typically the last header
+                            elif current_section == 'to' and not line.lower().startswith(('cc:', 'subject:', 'from:')):
+                                full_to_text += " " + line
+                            elif current_section == 'cc' and not line.lower().startswith(('subject:', 'from:')):
+                                full_cc_text += " " + line
+                        
+                        # Process To: recipients
+                        # Fix line breaks in names 
+                        full_to_text = re.sub(r'(\w+)\s*\n\s*(\w+)', r'\1 \2', full_to_text)
+                        to_parts = re.split(r',\s*', full_to_text)
+                        for part in to_parts:
+                            part = part.strip()
+                            if not part:
+                                continue
+                                
+                            if '@' in part:
+                                to_recipients.append(part.lower())
+                            else:
+                                # Handle Enron internal format (Name/Department/Enron@ECT)
+                                name_parts = part.split('/')
+                                if name_parts and len(name_parts) >= 1:
+                                    name = name_parts[0].strip()
+                                    if name and not name.lower().startswith('to:'):
+                                        to_recipients.append(name.lower().replace(' ', '.') + '@enron.com')
+                    
+                    # Extract Cc: recipients
+                    cc_recipients = []
+                    if full_cc_text:
+                        # Fix line breaks in names
+                        full_cc_text = re.sub(r'(\w+)\s*\n\s*(\w+)', r'\1 \2', full_cc_text)
+                        cc_parts = re.split(r',\s*', full_cc_text)
+                        for part in cc_parts:
+                            part = part.strip()
+                            if not part:
+                                continue
+                                
+                            if '@' in part:
+                                cc_recipients.append(part.lower())
+                            else:
+                                # Handle Enron internal format
+                                name_parts = part.split('/')
+                                if name_parts and len(name_parts) >= 1:
+                                    name = name_parts[0].strip()
+                                    if name and not name.lower().startswith('cc:'):
+                                        cc_recipients.append(name.lower().replace(' ', '.') + '@enron.com')
+                    
+                    # Determine body content - everything after the headers
+                    body_start = -1
+                    for i in range(len(lines)):
+                        if lines[i].strip().lower().startswith('subject:'):
+                            # Find first non-empty line after subject
+                            for j in range(i+1, len(lines)):
+                                if not lines[j].strip() and j+1 < len(lines) and lines[j+1].strip():
+                                    body_start = j+1
+                                    break
+                            break
+                    
+                    body_content = ""
+                    if body_start > 0:
+                        body_content = '\n'.join(lines[body_start:])
+                    
+                    # Parse date to ISO format
+                    parsed_date = None
+                    try:
+                        # Try to parse the date using helper function
+                        parsed_date = extract_date(date_str)
+                    except Exception as e:
+                        if self.debug:
+                            print(f"Error parsing date: {e}")
+                    
+                    # Create nested email data
+                    nested_data = {
+                        'id': generate_id(forwarded_content, file_id, idx),
+                        'date': parsed_date,
+                        'subject': subject or parent_subject,
+                        'from': sender,
+                        'to': to_recipients,
+                        'cc': cc_recipients,
+                        'bcc': [],
+                        'body_clean': body_content,
+                        'file_source': f"{file_id}-nested-{idx}",
+                    }
+                    
+                    # If we have at least some fields, return the data
+                    if nested_data['from'] and (nested_data['to'] or nested_data['subject']):
+                        return nested_data
+            
+            # Direct extraction of Enron format date for debugging
+            date_string = None
+            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))', forwarded_content)
+            if date_match:
+                date_string = date_match.group(1)
+                parsed_date = None
+                try:
+                    # Try to directly parse the date without going through helpers
+                    from datetime import datetime
+                    import pytz
+                    
+                    # Handle MM/DD/YYYY HH:MM AM/PM format
+                    if "AM" in date_string or "PM" in date_string:
+                        dt_format = "%m/%d/%Y %I:%M %p"
+                        # Clean up any seconds that might be present
+                        if ":" in date_string.split()[1].split()[0]:
+                            parts = date_string.split()
+                            time_parts = parts[1].split(":")
+                            if len(time_parts) > 2:  # Has seconds
+                                date_string = f"{parts[0]} {time_parts[0]}:{time_parts[1]} {parts[2]}"
+                    else:
+                        dt_format = "%m/%d/%Y %H:%M"
+                    
+                    dt = datetime.strptime(date_string, dt_format)
+                    
+                    # Set timezone to US Central (Enron default)
+                    central = pytz.timezone('US/Central')
+                    dt = central.localize(dt)
+                    
+                    # Convert to UTC
+                    dt = dt.astimezone(pytz.UTC)
+                    
+                    parsed_date = dt.isoformat()
+                    
+                    if self.debug:
+                        print(f"Successfully parsed date: {date_string} -> {parsed_date}")
+                except Exception as date_e:
+                    if self.debug:
+                        print(f"Error parsing date {date_string}: {date_e}")
+            
             # First try Enron-specific header extraction
             nested_headers = extract_enron_style_headers(forwarded_content)
             
@@ -213,15 +384,26 @@ class EmailParser:
             if "Please respond to <" in forwarded_content and "To: \"" in forwarded_content:
                 self._handle_please_respond_format(forwarded_content, nested_headers)
             
+            # If we found a date directly, add it to the headers
+            if parsed_date and not nested_headers.get('date'):
+                nested_headers['date'] = date_string
+            
             # Check if we got meaningful data from the header extractor
             if nested_headers['from'] or (nested_headers['to'] and len(nested_headers['to']) > 0) or nested_headers['subject']:
-                return self._create_nested_email_dict(
+                # Create the email with the extracted headers
+                nested_data = self._create_nested_email_dict(
                     forwarded_content, 
                     nested_headers, 
                     file_id, 
                     idx, 
                     parent_subject
                 )
+                
+                # If we have a manually parsed date, use it
+                if parsed_date and not nested_data['date']:
+                    nested_data['date'] = parsed_date
+                    
+                return nested_data
             
             # If the Enron-specific extractor didn't work well, try the standard approach
             fwd_fields = extract_forwarded_headers(forwarded_content)
@@ -230,10 +412,17 @@ class EmailParser:
             body_clean = self._get_nested_body_content(fwd_fields, forwarded_content, file_id)
             
             # Create a unique ID for this nested email
+            # Use the file_id to ensure all emails from same file have same base ID
             nested_id = generate_id(forwarded_content, file_id, idx)
             
             # Parse date to ISO format if present
-            parsed_date = extract_date(fwd_fields['date']) if fwd_fields['date'] else None
+            if fwd_fields['date']:
+                parsed_date = extract_date(fwd_fields['date'])
+            elif parsed_date:
+                # Use our directly parsed date if we found one
+                pass
+            else:
+                parsed_date = None
             
             # Create the nested email data
             nested_data = {
@@ -358,7 +547,7 @@ class EmailParser:
         Args:
             content: Full content of the nested email
             headers: Extracted headers
-            file_path: Path to the original email file
+            file_id: Path to the original email file
             idx: Index of the nested email in the parent
             parent_subject: Subject of the parent email
             
@@ -411,13 +600,13 @@ class EmailParser:
         except Exception:
             return headers.get('body_clean', '') or clean_body(content)
     
-    def _extract_nested_email_fallback(self, content, file_path, idx, parent_subject):
+    def _extract_nested_email_fallback(self, content, file_id, idx, parent_subject):
         """
         Fallback method to extract nested email data.
         
         Args:
             content: Content of the nested email
-            file_path: Path to the original email file
+            file_id: Path to the original email file
             idx: Index of the nested email in the parent
             parent_subject: Subject of the parent email
             
@@ -431,8 +620,8 @@ class EmailParser:
         # Extract fields from the forwarded message
         fwd_fields = self._extract_email_fields(forwarded_msg)
         
-        # Create a unique ID for this nested email
-        nested_id = generate_id(content)
+        # Create a unique ID for this nested email using file_id for consistency
+        nested_id = generate_id(content, file_id, idx)
         
         # Add the nested email to our dataset
         return {
@@ -444,7 +633,7 @@ class EmailParser:
             'cc': fwd_fields['cc'],
             'bcc': fwd_fields['bcc'],
             'body_clean': fwd_fields['body_clean'] or clean_body(content),
-            'file_source': f"{file_path}-nested-{idx}",
+            'file_source': f"{file_id}-nested-{idx}",
         }
     
     def _generate_thread_id(self, row):
@@ -510,7 +699,7 @@ class EmailParser:
         # Parse the email content as a message object
         msg = email.message_from_string(content, policy=policy.default)
         
-        # Process the main email
+        # Process the main email - use file_id for main message ID
         msg_id = generate_id(content, file_id)
         
         email_fields = self._extract_email_fields(msg)

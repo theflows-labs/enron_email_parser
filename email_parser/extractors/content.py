@@ -12,125 +12,126 @@ from email_parser.utils.helpers import clean_body
 
 def extract_original_email(body: str) -> List[str]:
     """
-    Extract forwarded or replied-to messages from the email body.
+    Extract forwarded/nested email content from an email body.
+    
+    This function looks for various patterns that indicate forwarded
+    or nested email content within the body text.
     
     Args:
-        body: Email body content
+        body: Email body text
         
     Returns:
-        List of forwarded email content blocks
+        List of extracted forwarded email content strings
     """
+    if not body:
+        return []
+    
     forwarded_emails = []
     
-    # First look for structured forwarded message blocks
-    # Pattern for the standard Enron-style forwarding with dashed lines
-    forwarded_pattern = r"(-{5,}.*?Forwarded.*?-{5,}.*?\n)(.*?)(?=\n\s*-{5,}|\Z)"
-    
+    # Look for the standard Enron forwarded message marker
     try:
-        matches = re.finditer(forwarded_pattern, body, re.DOTALL | re.MULTILINE)
-        for match in matches:
-            forwarded_header = match.group(1)
-            forwarded_content = match.group(2)
+        # Find the start markers for forwarded emails
+        forward_markers = []
+        
+        # Pattern 1: Standard dashed line with "Forwarded by" text
+        pattern1 = r"-+\s*Forwarded by.+?-+\s*\n\n"
+        for match in re.finditer(pattern1, body, re.MULTILINE | re.DOTALL):
+            forward_markers.append(match.end())
+        
+        # Pattern 2: From: header in the middle of the body
+        pattern2 = r"\n\nFrom:"
+        for match in re.finditer(pattern2, body):
+            forward_markers.append(match.end() - 5)  # Start after the newlines but before "From:"
+        
+        # Pattern 3: "Original Message" divider
+        pattern3 = r"-+\s*Original Message\s*-+\s*\n"
+        for match in re.finditer(pattern3, body, re.MULTILINE):
+            forward_markers.append(match.end())
+        
+        # Pattern 4: Names with dates in Enron format
+        pattern4 = r"\n\n([A-Za-z][A-Za-z\s]+)\n(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s+[AP]M)\nTo:"
+        for match in re.finditer(pattern4, body, re.MULTILINE):
+            # Start at the beginning of the name
+            forward_markers.append(match.start() + 2)  # +2 to skip the newlines
+        
+        # Sort markers by position
+        forward_markers.sort()
+        
+        # Extract content between markers
+        for i in range(len(forward_markers)):
+            start = forward_markers[i]
             
-            # Include everything: the forwarding line, the headers, and the content
-            full_content = forwarded_header + forwarded_content
-            if full_content and len(full_content) > 20:
-                forwarded_emails.append(full_content)
+            # Find the next marker or the end of the body
+            if i < len(forward_markers) - 1:
+                end = forward_markers[i + 1]
+            else:
+                end = len(body)
+            
+            # Extract the content between markers
+            content = body[start:end].strip()
+            
+            # If we have actual content, add it to our list
+            if content and len(content) > 20:  # Skip very short segments
+                forwarded_emails.append(content)
     except Exception as e:
-        print(f"Error in forwarded pattern: {e}")
+        print(f"Error extracting forwarded emails: {e}")
     
-    # If we didn't find structured blocks, try looking for common forwarding patterns
+    # Look for common forwarded message patterns if we didn't find any yet
     if not forwarded_emails:
         try:
-            # Pattern for "Please respond to" format common in personal emails
-            respond_pattern = r"(\".*?\"\s+<.*?>\s+on\s+\d{1,2}/\d{1,2}/\d{4}\s+.*?\s+(?:AM|PM)\s*\nPlease respond to\s+<.*?>\s*\nTo:.*?\n(?:cc:.*?\n)?(?:Subject:.*?\n)?)(.*?)(?=\n\n-{3,}|\Z)"
-            respond_matches = re.finditer(respond_pattern, body, re.DOTALL | re.MULTILINE | re.IGNORECASE)
-            for match in respond_matches:
-                header_part = match.group(1)
-                content_part = match.group(2)
-                
-                full_content = header_part + content_part
-                if full_content and len(full_content) > 30:
-                    forwarded_emails.append(full_content)
-        except Exception as e:
-            print(f"Error in respond pattern: {e}")
-    
-    # If we still haven't found any forwarded content, try other patterns
-    if not forwarded_emails:
-        # Common patterns for forwarded content
-        forward_patterns = [
-            # Forwarded by pattern (common in corporate emails)
-            r"([-]+ Forwarded by .*? on .*? [-]+\s*\n+)(.*?)(?=\s*\n\s*-{5,}|$)",
+            # More forgiving pattern to find forwarded content
+            forward_patterns = [
+                r"(?:-{2,}|={2,})\s*Forwarded\s+by.+?(?:-{2,}|={2,}).+?$",
+                r"(?:-{2,}|={2,})\s*Original\s+Message\s*(?:-{2,}|={2,}).+?$",
+                r"From:.+?(?:\n|\r\n)To:.+?(?:\n|\r\n)(?:Cc:.+?(?:\n|\r\n))?(?:Subject:.+?(?:\n|\r\n))",
+                r"On.+?wrote:"
+            ]
             
-            # Original Message pattern
-            r"([-]+Original Message[-]+\s*\n+From: .*?\n)(.*?)(?=\s*\n\s*-{5,}|$)",
-            
-            # "From:" pattern in the body (often in forwarded messages)
-            r"(\n\nFrom: .*?\n(?:To: .*?\n)(?:(?:Cc: .*?\n)?)(?:(?:Bcc: .*?\n)?)(?:Subject: .*?\n)(?:(?:Date: .*?\n)?))(.*?)(?=\n\nFrom: |\n\n-{3,}|$)",
-        ]
-        
-        # Try each pattern to extract forwarded content
-        for pattern in forward_patterns:
-            try:
-                matches = re.finditer(pattern, body, re.DOTALL | re.MULTILINE | re.IGNORECASE)
+            for pattern in forward_patterns:
+                matches = re.finditer(pattern, body, re.MULTILINE | re.DOTALL)
                 for match in matches:
-                    header_part = match.group(1)
-                    content_part = match.group(2) if len(match.groups()) > 1 else ""
+                    # Extract content starting from the match
+                    start = match.start()
+                    end = len(body)
                     
-                    full_content = header_part + content_part
-                    if full_content and len(full_content) > 20 and full_content not in forwarded_emails:
-                        forwarded_emails.append(full_content)
-            except Exception as e:
-                print(f"Error with regex pattern: {e}")
-                continue
-        
-        # Additional non-regex approach for finding forwarded emails
-        # Look for common delimiters and extract the content between them
-        delimiters = [
-            "\n\n----- Forwarded",
-            "\n\n----- Original",
-            "\n\nFrom:",
-        ]
-        
-        for delimiter in delimiters:
-            if delimiter in body:
-                parts = body.split(delimiter)
-                for i in range(1, len(parts)):
-                    forwarded_part = delimiter + parts[i]
-                    if forwarded_part not in forwarded_emails and len(forwarded_part) > 20:
-                        forwarded_emails.append(forwarded_part)
-    
-    # Special handling for the specific format in file 117 (without hardcoding)
-    # Look for a pattern that matches this specific structure
-    if not forwarded_emails and "Please respond to <" in body and "To: \"" in body:
-        try:
-            # This pattern looks for email address in angle brackets, with "Please respond to"
-            # followed by To/cc/Subject lines
-            respond_pattern = r"(\".*?\"\s+<(.*?)>\s+on\s+.*?\s*\nPlease respond to\s+<.*?>\s*\nTo:\s+\".*?\"\s+<(.*?)>.*?\n(?:cc:.*?\n)?(?:Subject:(.*?)\n)?)(.*?)(?=\n\n-{3,}|\Z)"
-            respond_matches = re.finditer(respond_pattern, body, re.DOTALL)
-            
-            for match in respond_matches:
-                if len(match.groups()) >= 3:  # Ensure we have enough capture groups
-                    full_content = match.group(0)
-                    if full_content and len(full_content) > 30:
-                        forwarded_emails.append(full_content)
+                    # Look for a potential end marker (another forwarded message or end of text)
+                    for end_pattern in forward_patterns:
+                        end_match = re.search(end_pattern, body[start + 10:], re.MULTILINE | re.DOTALL)
+                        if end_match:
+                            # Only use this as an end if it's different from our start pattern
+                            if end_match.group() != match.group():
+                                end = start + 10 + end_match.start()
+                                break
+                    
+                    content = body[start:end].strip()
+                    if content and len(content) > 20 and content not in forwarded_emails:
+                        forwarded_emails.append(content)
         except Exception as e:
-            print(f"Error in specific pattern: {e}")
+            print(f"Error in forwarded pattern: {e}")
     
     # Look for Enron's internal format as well (nested messages)
     if not forwarded_emails:
         try:
-            nested_pattern = r"\n\n([A-Za-z\s]+)\n(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s+[AP]M)\nTo: ([^\n]+)(?:\ncc: ([^\n]*))?(?:\nSubject: ([^\n]+))\n\n"
+            # More flexible pattern to match the Allan Severude format
+            # Name on first line
+            # Date on second line (MM/DD/YYYY HH:MM AM/PM)
+            # To: with recipients (possibly spanning multiple lines)
+            # cc: with recipients (possibly spanning multiple lines)
+            # Subject: line
+            nested_pattern = r"\n\n([A-Za-z][A-Za-z\s]+)\n(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\n(?:To:|cc:|Subject:)"
+            
             nested_matches = re.finditer(nested_pattern, body, re.MULTILINE)
             
             for match in nested_matches:
                 # Extract the entire message including headers and content 
                 # by finding where this match appears in the body
-                start_idx = match.start()
+                start_idx = match.start() + 2  # +2 to skip the newlines at the start
                 
-                # Find the next message or the end of the body
-                next_match_idx = body.find("\n\n", match.end())
-                if next_match_idx < 0:
+                # Find the next message start or the end of the body
+                next_match = re.search(nested_pattern, body[start_idx + 10:], re.MULTILINE)
+                if next_match:
+                    next_match_idx = start_idx + 10 + next_match.start()
+                else:
                     next_match_idx = len(body)
                 
                 # Extract the full nested message

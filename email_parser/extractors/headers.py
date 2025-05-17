@@ -302,30 +302,162 @@ def extract_nested_email_headers(content: str) -> Dict[str, Any]:
         'body_clean': '',
     }
     
+    # Handle the specific format: Name on first line, date on second, then To:, cc:, Subject:
     lines = content.split('\n')
     
-    # Reset line trackers
-    name_line = -1
-    date_line = -1
-    to_line = -1
-    cc_line = -1
-    subject_line = -1
-    body_start = -1
-    
-    # Look for the pattern
-    for i, line in enumerate(lines):
-        stripped = line.strip()
+    # Try to determine if we have the specific format
+    if len(lines) >= 5:
+        name_line_idx = -1
+        date_line_idx = -1
+        to_line_idx = -1
         
-        # If pattern already started, look for headers
-        if name_line >= 0:
-            # Next line after name should be date
-            if i == name_line + 1 and re.match(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s+[AP]M', stripped):
-                date_line = i
-                headers['date'] = stripped
+        # Look for the pattern of name, date, To: in the first few lines
+        for i in range(min(10, len(lines))):
+            line = lines[i].strip()
+            
+            # First non-empty line could be a name
+            if name_line_idx == -1 and line and not line.startswith(('-', 'From:', 'To:', 'cc:', 'Subject:')):
+                name_line_idx = i
+            # Date line should follow the name line
+            elif name_line_idx != -1 and date_line_idx == -1 and re.match(r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)', line):
+                date_line_idx = i
+            # To: line should follow the date line
+            elif date_line_idx != -1 and to_line_idx == -1 and line.lower().startswith('to:'):
+                to_line_idx = i
+                break
+        
+        # If we found the pattern, extract headers using this specific format
+        if name_line_idx != -1 and date_line_idx != -1 and to_line_idx != -1:
+            # Extract the name and create email
+            name = lines[name_line_idx].strip()
+            # Make sure the name is properly converted to an email
+            if name and not '@' in name:
+                headers['from'] = name.lower().replace(' ', '.') + '@enron.com'
+            else:
+                headers['from'] = name
+            
+            # Extract the date
+            headers['date'] = lines[date_line_idx].strip()
+            
+            # Process each subsequent line for headers
+            in_to_section = False
+            in_cc_section = False
+            to_lines = []
+            cc_lines = []
+            
+            for i in range(to_line_idx, len(lines)):
+                line = lines[i].strip()
+                
+                # Skip empty lines
+                if not line:
+                    continue
+                
+                # Check for header markers
+                if line.lower().startswith('to:'):
+                    in_to_section = True
+                    in_cc_section = False
+                    to_lines.append(line[3:].strip())  # Add content after "To:"
+                elif line.lower().startswith('cc:'):
+                    in_to_section = False
+                    in_cc_section = True
+                    cc_lines.append(line[3:].strip())  # Add content after "cc:"
+                elif line.lower().startswith('subject:'):
+                    in_to_section = False
+                    in_cc_section = False
+                    headers['subject'] = line[8:].strip()
+                    # Subject line typically ends the header section
+                    break
+                elif in_to_section:
+                    # This is a continuation of the To: line
+                    to_lines.append(line)
+                elif in_cc_section:
+                    # This is a continuation of the cc: line
+                    cc_lines.append(line)
+            
+            # Process all collected To: lines
+            if to_lines:
+                # Join all lines and split by commas to get individual recipients
+                to_text = ' '.join(to_lines)
+                to_recipients = re.split(r',\s*', to_text)
+                for recipient in to_recipients:
+                    recipient = recipient.strip()
+                    if not recipient:
+                        continue
+                    
+                    # If it has an @ symbol, it's already an email
+                    if '@' in recipient:
+                        headers['to'].append(recipient.lower())
+                    else:
+                        # Handle Enron internal format (Name/Dept/Enron)
+                        name_parts = recipient.split('/')
+                        if name_parts and len(name_parts) >= 1:
+                            name = name_parts[0].strip()
+                            if name and not name.lower().startswith(('to:', 'cc:')):
+                                headers['to'].append(name.lower().replace(' ', '.') + '@enron.com')
+            
+            # Process all collected cc: lines
+            if cc_lines:
+                # Join all lines and split by commas to get individual recipients
+                cc_text = ' '.join(cc_lines)
+                
+                # Fix common pattern in wrapped lines where there might be 
+                # unintended splits due to line breaks
+                # Example: "Scott\nMills/HOU/ECT@ECT" should be "Scott Mills/HOU/ECT@ECT"
+                cc_text = re.sub(r'(\w+)\s*\n\s*(\w+)', r'\1 \2', cc_text)
+                
+                cc_recipients = re.split(r',\s*', cc_text)
+                for recipient in cc_recipients:
+                    recipient = recipient.strip()
+                    if not recipient:
+                        continue
+                    
+                    # If it has an @ symbol, it's already an email
+                    if '@' in recipient:
+                        headers['cc'].append(recipient.lower())
+                    else:
+                        # Handle Enron internal format (Name/Dept/Enron)
+                        name_parts = recipient.split('/')
+                        if name_parts and len(name_parts) >= 1:
+                            name = name_parts[0].strip()
+                            if name and not name.lower().startswith(('to:', 'cc:')):
+                                headers['cc'].append(name.lower().replace(' ', '.') + '@enron.com')
+            
+            # If we've found valid headers, return them
+            if headers['from'] and headers['date'] and (headers['to'] or headers['subject']):
+                # Extract body - everything after the headers
+                body_start = -1
+                for i in range(len(lines)):
+                    if lines[i].strip().lower().startswith('subject:'):
+                        # Body starts after an empty line following the subject
+                        for j in range(i+1, len(lines)):
+                            if not lines[j].strip() and j+1 < len(lines) and lines[j+1].strip():
+                                body_start = j+1
+                                break
+                        break
+                
+                if body_start != -1:
+                    headers['body_clean'] = '\n'.join(lines[body_start:]).strip()
+                
+                return headers
+    
+    # If the specific format matching didn't work, fall back to the original implementation
+    
+    # Specific Enron format: try direct pattern matching for the exact format
+    name_date_pattern = r'^\s*([A-Za-z][\w\s]+?)\s*\n\s*(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\s*\n'
+    name_date_match = re.search(name_date_pattern, content, re.MULTILINE)
+    
+    if name_date_match:
+        name, date = name_date_match.groups()
+        headers['from'] = name.strip().lower().replace(' ', '.') + '@enron.com'
+        headers['date'] = date.strip()
+        
+        # Extract other headers
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            stripped = line.strip()
             
             # Look for explicit header markers
-            elif stripped.lower().startswith('to:'):
-                to_line = i
+            if stripped.lower().startswith('to:'):
                 # Extract email addresses
                 email_parts = stripped[3:].strip().split(',')
                 to_emails = []
@@ -336,7 +468,7 @@ def extract_nested_email_headers(content: str) -> Dict[str, Any]:
                     else:
                         # Try to handle Enron internal format like "Name/DEPT/COMPANY@tag"
                         name_parts = part.split('/')
-                        if len(name_parts) >= 2:
+                        if len(name_parts) >= 1:  # Changed from 2 to 1 to be more lenient
                             name = name_parts[0].strip()
                             if '@' not in name and not name.lower().startswith('to:'):
                                 # Convert internal format to email-like format
@@ -346,7 +478,6 @@ def extract_nested_email_headers(content: str) -> Dict[str, Any]:
                 headers['to'] = to_emails
             
             elif stripped.lower().startswith('cc:'):
-                cc_line = i
                 # Extract CC emails similarly
                 if len(stripped) > 3:
                     email_parts = stripped[3:].strip().split(',')
@@ -357,7 +488,7 @@ def extract_nested_email_headers(content: str) -> Dict[str, Any]:
                         else:
                             # Try to handle Enron internal format
                             name_parts = part.split('/')
-                            if len(name_parts) >= 2:
+                            if len(name_parts) >= 1:  # Changed from 2 to 1
                                 name = name_parts[0].strip()
                                 if '@' not in name and not name.lower().startswith('cc:'):
                                     email = name.lower().replace(' ', '.') + '@enron.com'
@@ -366,20 +497,98 @@ def extract_nested_email_headers(content: str) -> Dict[str, Any]:
                     headers['cc'] = cc_emails
             
             elif stripped.lower().startswith('subject:'):
-                subject_line = i
                 headers['subject'] = stripped[8:].strip()
-            
-            # Find body start after all headers are processed
-            elif subject_line >= 0 and stripped == '' and i < len(lines) - 1 and lines[i+1].strip() != '':
-                body_start = i + 1
-                break
+    
+    # If we didn't find headers using direct pattern matching, try line-by-line approach
+    if not headers['from'] or not headers['date']:
+        lines = content.split('\n')
         
-        # Look for name at the start of a forwarded section
-        elif i > 0 and lines[i-1].strip() == '' and stripped and not stripped.startswith('-'):
-            # Check if next line looks like a date
-            if i < len(lines) - 1 and re.match(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s+[AP]M', lines[i+1].strip()):
-                name_line = i
-                headers['from'] = stripped.lower().replace(' ', '.') + '@enron.com'
+        # Reset line trackers
+        name_line = -1
+        date_line = -1
+        to_line = -1
+        cc_line = -1
+        subject_line = -1
+        body_start = -1
+        
+        # Specific Enron date pattern (MM/DD/YYYY HH:MM AM/PM)
+        date_pattern = r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)'
+        
+        # Look for the pattern
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # If pattern already started, look for headers
+            if name_line >= 0:
+                # Next line after name should be date
+                if i == name_line + 1 and re.match(date_pattern, stripped):
+                    date_line = i
+                    headers['date'] = stripped
+                
+                # Look for explicit header markers
+                elif stripped.lower().startswith('to:'):
+                    to_line = i
+                    # Extract email addresses
+                    email_parts = stripped[3:].strip().split(',')
+                    to_emails = []
+                    for part in email_parts:
+                        # Try to extract email from various formats
+                        if '@' in part:
+                            to_emails.append(part.strip().lower())
+                        else:
+                            # Try to handle Enron internal format like "Name/DEPT/COMPANY@tag"
+                            name_parts = part.split('/')
+                            if len(name_parts) >= 1:
+                                name = name_parts[0].strip()
+                                if '@' not in name and not name.lower().startswith('to:'):
+                                    # Convert internal format to email-like format
+                                    email = name.lower().replace(' ', '.') + '@enron.com'
+                                    to_emails.append(email)
+                    
+                    headers['to'] = to_emails
+                
+                elif stripped.lower().startswith('cc:'):
+                    cc_line = i
+                    # Extract CC emails similarly
+                    if len(stripped) > 3:
+                        email_parts = stripped[3:].strip().split(',')
+                        cc_emails = []
+                        for part in email_parts:
+                            if '@' in part:
+                                cc_emails.append(part.strip().lower())
+                            else:
+                                # Try to handle Enron internal format
+                                name_parts = part.split('/')
+                                if len(name_parts) >= 1:
+                                    name = name_parts[0].strip()
+                                    if '@' not in name and not name.lower().startswith('cc:'):
+                                        email = name.lower().replace(' ', '.') + '@enron.com'
+                                        cc_emails.append(email)
+                        
+                        headers['cc'] = cc_emails
+                
+                elif stripped.lower().startswith('subject:'):
+                    subject_line = i
+                    headers['subject'] = stripped[8:].strip()
+                
+                # Find body start after all headers are processed
+                elif subject_line >= 0 and stripped == '' and i < len(lines) - 1 and lines[i+1].strip() != '':
+                    body_start = i + 1
+                    break
+            
+            # Look for name at the start of a forwarded section
+            elif i > 0 and lines[i-1].strip() == '' and stripped and not stripped.startswith('-'):
+                # Check if next line looks like a date
+                if i < len(lines) - 1 and re.match(date_pattern, lines[i+1].strip()):
+                    name_line = i
+                    headers['from'] = stripped.lower().replace(' ', '.') + '@enron.com'
+    
+    # Finally, try to extract the date using a direct search
+    if not headers['date']:
+        # Look for date in the format MM/DD/YYYY HH:MM AM/PM
+        date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))', content)
+        if date_match:
+            headers['date'] = date_match.group(1).strip()
     
     # Extract body content if we found the start
     if body_start > 0:
@@ -404,9 +613,12 @@ def extract_forwarded_headers(content: str) -> Dict[str, Any]:
     if '---------------------- Forwarded by' in content or '"' in content and '<' in content and '>' in content and ' on ' in content:
         return extract_enron_style_headers(content)
     
-    # Try the simpler Enron nested format
-    elif re.search(r'\n\w+\s+\w+\n\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s+[AP]M\n', content):
-        return extract_nested_email_headers(content)
+    # Try the simpler Enron nested format with name and date at the top
+    if re.search(r'\n\w+\s+\w+\n\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\n', content, re.MULTILINE):
+        headers = extract_nested_email_headers(content)
+        # If we found date and other headers, return them
+        if headers['date'] and (headers['from'] or headers['to'] or headers['subject']):
+            return headers
     
     # If not Enron format, try generic header extraction
     headers = {
@@ -419,7 +631,71 @@ def extract_forwarded_headers(content: str) -> Dict[str, Any]:
         'body_clean': '',
     }
     
-    # Extract common headers
+    # Look for the Enron-style name and date pattern at the beginning
+    name_date_pattern = r'^\s*([A-Za-z][\w\s]+?)\s*\n\s*(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\s*\n'
+    name_date_match = re.search(name_date_pattern, content, re.MULTILINE)
+    if name_date_match:
+        name, date = name_date_match.groups()
+        # Make sure the name is properly converted to an email
+        if name and not '@' in name.strip():
+            headers['from'] = name.strip().lower().replace(' ', '.') + '@enron.com'
+        else:
+            headers['from'] = name.strip()
+        headers['date'] = date.strip()
+        
+        # Look for To: and cc: lines after the date
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith('to:'):
+                to_text = line[3:].strip()
+                if to_text:
+                    # Extract email addresses
+                    to_parts = re.split(r',\s*', to_text)
+                    for part in to_parts:
+                        if '@' in part:
+                            headers['to'].append(part.strip().lower())
+                        elif '/' in part:  # Enron format
+                            name_parts = part.split('/')
+                            if name_parts and len(name_parts) >= 1:
+                                headers['to'].append(name_parts[0].strip().lower().replace(' ', '.') + '@enron.com')
+            
+            elif line.strip().lower().startswith('cc:'):
+                cc_text = line[3:].strip()
+                if cc_text:
+                    # Extract email addresses
+                    cc_parts = re.split(r',\s*', cc_text)
+                    for part in cc_parts:
+                        if '@' in part:
+                            headers['cc'].append(part.strip().lower())
+                        elif '/' in part:  # Enron format
+                            name_parts = part.split('/')
+                            if name_parts and len(name_parts) >= 1:
+                                headers['cc'].append(name_parts[0].strip().lower().replace(' ', '.') + '@enron.com')
+            
+            elif line.strip().lower().startswith('subject:'):
+                headers['subject'] = line[8:].strip()
+    
+    # If we found any headers with the name/date pattern, return them
+    if headers['from'] and headers['date']:
+        # Extract body - everything after the headers
+        body_start = 0
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith('subject:'):
+                body_start = i + 1
+                break
+        
+        if body_start > 0 and body_start < len(lines):
+            # Skip any blank lines after the Subject
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
+            
+            if body_start < len(lines):
+                headers['body_clean'] = '\n'.join(lines[body_start:]).strip()
+        
+        return headers
+    
+    # Extract common headers using standard patterns
     headers['from'] = extract_header_from_text(content, "From")
     to_str = extract_header_from_text(content, "To")
     headers['to'] = normalize_addresses(to_str) if to_str else []
@@ -431,7 +707,14 @@ def extract_forwarded_headers(content: str) -> Dict[str, Any]:
     headers['bcc'] = normalize_addresses(bcc_str) if bcc_str else []
     
     headers['subject'] = extract_header_from_text(content, "Subject")
+    
+    # Try different ways to extract the date
     headers['date'] = extract_header_from_text(content, "Date")
+    if not headers['date']:
+        # Look for date in Enron format: MM/DD/YYYY HH:MM AM/PM
+        date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))', content)
+        if date_match:
+            headers['date'] = date_match.group(1)
     
     # Extract body - everything after the headers block
     body = ""
