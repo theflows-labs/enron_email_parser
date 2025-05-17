@@ -192,13 +192,13 @@ class EmailParser:
             'body_clean': body_clean,
         }
     
-    def _extract_nested_email(self, forwarded_content, file_path, idx, parent_subject):
+    def _extract_nested_email(self, forwarded_content, file_id, idx, parent_subject):
         """
         Extract data from a nested/forwarded email.
         
         Args:
             forwarded_content: Content of the forwarded email
-            file_path: Path to the original email file
+            file_id: Identifier for the source (for tracking purposes)
             idx: Index of the nested email in the parent
             parent_subject: Subject of the parent email
             
@@ -218,7 +218,7 @@ class EmailParser:
                 return self._create_nested_email_dict(
                     forwarded_content, 
                     nested_headers, 
-                    file_path, 
+                    file_id, 
                     idx, 
                     parent_subject
                 )
@@ -227,10 +227,10 @@ class EmailParser:
             fwd_fields = extract_forwarded_headers(forwarded_content)
             
             # Get full body content
-            body_clean = self._get_nested_body_content(fwd_fields, forwarded_content, file_path)
+            body_clean = self._get_nested_body_content(fwd_fields, forwarded_content, file_id)
             
             # Create a unique ID for this nested email
-            nested_id = generate_id(forwarded_content)
+            nested_id = generate_id(forwarded_content, file_id, idx)
             
             # Parse date to ISO format if present
             parsed_date = extract_date(fwd_fields['date']) if fwd_fields['date'] else None
@@ -245,7 +245,7 @@ class EmailParser:
                 'cc': fwd_fields['cc'],
                 'bcc': fwd_fields['bcc'],
                 'body_clean': body_clean,
-                'file_source': f"{file_path}-nested-{idx}",
+                'file_source': f"{file_id}-nested-{idx}",
             }
             
             # Return if we have meaningful content
@@ -258,7 +258,7 @@ class EmailParser:
             
             # Try with pseudo-email method as fallback
             try:
-                return self._extract_nested_email_fallback(forwarded_content, file_path, idx, parent_subject)
+                return self._extract_nested_email_fallback(forwarded_content, file_id, idx, parent_subject)
             except Exception as inner_e:
                 if self.debug:
                     print(f"Fallback parsing also failed: {inner_e}")
@@ -351,7 +351,7 @@ class EmailParser:
                 if cc_emails:
                     nested_headers['cc'] = cc_emails
     
-    def _create_nested_email_dict(self, content, headers, file_path, idx, parent_subject):
+    def _create_nested_email_dict(self, content, headers, file_id, idx, parent_subject):
         """
         Create a dictionary for a nested email from headers.
         
@@ -365,7 +365,7 @@ class EmailParser:
         Returns:
             Dictionary with nested email data
         """
-        nested_id = generate_id(content)
+        nested_id = generate_id(content, file_id, idx)
         parsed_date = extract_date(headers['date']) if headers['date'] else None
         
         # Try to get the full body content
@@ -382,7 +382,7 @@ class EmailParser:
             'cc': headers['cc'],
             'bcc': headers['bcc'],
             'body_clean': body_clean,
-            'file_source': f"{file_path}-nested-{idx}",
+            'file_source': f"{file_id}-nested-{idx}",
         }
     
     def _get_nested_body_content(self, headers, content, file_path):
@@ -511,7 +511,7 @@ class EmailParser:
         msg = email.message_from_string(content, policy=policy.default)
         
         # Process the main email
-        msg_id = generate_id(content)
+        msg_id = generate_id(content, file_id)
         
         email_fields = self._extract_email_fields(msg)
         

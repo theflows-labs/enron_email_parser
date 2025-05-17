@@ -12,17 +12,47 @@ from email.utils import parseaddr, getaddresses
 from typing import List, Optional
 
 
-def generate_id(content: str) -> str:
+def generate_id(content, file_id=None, message_index=None):
     """
-    Generate a stable ID based on content hash.
+    Generate a stable ID for an email using file_id and optional index.
     
     Args:
-        content: The content to hash
+        content: Email content string
+        file_id: Source file identifier
+        message_index: Optional index of the message within the file (for nested messages)
         
     Returns:
-        A hex digest string representing the SHA-256 hash of the content
+        A hex digest string representing the stable ID
     """
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    import hashlib
+    
+    # If we have file_id, use it as the primary component
+    if file_id:
+        # Create a base ID from the file_id
+        base_id = hashlib.md5(str(file_id).encode('utf-8')).hexdigest()[:16]
+        
+        # TODO: Add the index to the base_id if needed or for any edge cases.
+        # # If this is a nested message, add the index
+        # if message_index is not None:
+        #     # Format: base_id + '_n' + index (n for nested)
+        #     return f"{base_id}_n{message_index}"
+        
+        # For the main message in the file, just use the base_id
+        return base_id
+    
+    # Fallback to content-based hash if no file_id is provided
+    # Use a sample of content for efficiency
+    if len(content) > 1000:
+        # Sample beginning, middle and end
+        beginning = content[:300]
+        middle_start = max(0, len(content) // 2 - 150)
+        middle = content[middle_start:middle_start + 300]
+        end = content[max(0, len(content) - 300):]
+        sample = beginning + middle + end
+        return hashlib.md5(sample.encode('utf-8')).hexdigest()
+    
+    # For smaller content, hash it directly
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 
 def extract_email_address(addr_str: str) -> str:
