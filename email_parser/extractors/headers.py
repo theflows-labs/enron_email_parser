@@ -15,6 +15,11 @@ from email_parser.utils.helpers import (
     clean_body
 )
 
+# TODO: this class needs to be refactored with more logic to handle the different formats of enron emails. 
+#       For example, the nested emails have a different format than the forwarded emails.
+#       Also, the headers are not always in the same order.
+#       So, we need to handle the different formats and extract the headers accordingly.    
+#       ========== There is scope for improvement here. ==========
 
 def extract_enron_style_headers(content: str) -> Dict[str, Any]:
     """
